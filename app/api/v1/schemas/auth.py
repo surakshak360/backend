@@ -3,7 +3,7 @@ from pydantic import BaseModel, EmailStr, Field
 
 
 class UserRegister(BaseModel):
-    phone: str = Field(..., json_schema_extra={"example": "+919876543210"})
+    phone: Optional[str] = Field(None, json_schema_extra={"example": "+919876543210"})
     email: EmailStr = Field(..., json_schema_extra={"example": "user@example.com"})
     password: str = Field(..., min_length=6)
     role: Literal["citizen", "officer", "admin", "analyst"] = "citizen"

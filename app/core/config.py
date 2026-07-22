@@ -1,6 +1,17 @@
+import os
+from pathlib import Path
 from typing import List, Union
 from pydantic import AnyHttpUrl, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
+ROOT_DIR = BACKEND_DIR.parent
+
+ENV_FILE_PATHS = [
+    str(BACKEND_DIR / ".env"),
+    str(ROOT_DIR / ".env"),
+    ".env"
+]
 
 
 class Settings(BaseSettings):
@@ -12,6 +23,9 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+
+    SUPABASE_URL: str = ""
+    SUPABASE_KEY: str = ""
 
     MONGODB_URI: str = "mongodb://localhost:27017"
     MONGODB_DB_NAME: str = "surakshak360"
@@ -36,7 +50,7 @@ class Settings(BaseSettings):
     ]
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=ENV_FILE_PATHS,
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore"

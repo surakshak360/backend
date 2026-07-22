@@ -11,6 +11,7 @@ from app.core.logging import setup_logging, logger
 from app.core.metrics import http_requests_total, http_request_duration_seconds
 from app.core.database import (
     connect_to_mongo, close_mongo_connection,
+    connect_to_supabase,
     connect_to_neo4j, close_neo4j_connection,
     connect_to_redis, close_redis_connection
 )
@@ -29,6 +30,7 @@ async def lifespan(app: FastAPI):
     setup_logging()
     logger.info("Starting up Surakshak360 Backend API...")
     await connect_to_mongo()
+    await connect_to_supabase()
     await connect_to_neo4j()
     await connect_to_redis()
     yield

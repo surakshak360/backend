@@ -1,13 +1,15 @@
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
-from fastapi import APIRouter, Depends, Request, Query, status
+from fastapi import APIRouter, Depends, Request, Query, status, UploadFile, File, Form
 from bson import ObjectId
 
 from app.api.v1.schemas.cases import CaseCreate, CaseUpdate
 from app.api.v1.schemas.evidence import EvidenceCreate
 from app.api.v1.schemas.envelope import make_envelope, make_paginated_envelope
 from app.api.v1.deps import get_current_user, get_ml_client_dep
-from app.core.database import get_mongo_db
+from app.core.database import get_mongo_db, get_supabase
+from app.core.logging import logger
 from app.core.exceptions import APIException
 from app.services.notifications import NotificationService
 from app.services.ml_client import MLClient
@@ -26,24 +28,40 @@ async def list_cases(
     current_user: dict = Depends(get_current_user)
 ):
     req_id = getattr(request.state, "request_id", "req_default")
+    sp = get_supabase()
     db = get_mongo_db()
     
-    query = {}
-    if status_filter:
-        query["status"] = status_filter
-    if priority:
-        query["priority"] = priority
-    if case_type:
-        query["type"] = case_type
-
-    # Citizens only see their reported cases
-    if current_user.get("role") == "citizen":
-        query["reporter_id"] = ObjectId(current_user.get("id")) if ObjectId.is_valid(current_user.get("id")) else current_user.get("id")
-
     cases_list = []
     total = 0
 
-    if db is not None:
+    if sp is not None:
+        try:
+            q = sp.table("cases").select("*")
+            if status_filter:
+                q = q.eq("status", status_filter)
+            if priority:
+                q = q.eq("priority", priority)
+            if case_type:
+                q = q.eq("type", case_type)
+            if current_user.get("role") == "citizen":
+                q = q.eq("reporter_id", str(current_user.get("id")))
+            res = q.order("created_at", desc=True).limit(page_size).execute()
+            cases_list = res.data or []
+            total = len(cases_list)
+        except Exception:
+            sp = None
+
+    if not cases_list and db is not None:
+        query = {}
+        if status_filter:
+            query["status"] = status_filter
+        if priority:
+            query["priority"] = priority
+        if case_type:
+            query["type"] = case_type
+        if current_user.get("role") == "citizen":
+            query["reporter_id"] = ObjectId(current_user.get("id")) if ObjectId.is_valid(current_user.get("id")) else current_user.get("id")
+
         total = await db.cases.count_documents(query)
         cursor = db.cases.find(query).sort("created_at", -1).skip((page - 1) * page_size).limit(page_size)
         async for c in cursor:
@@ -61,22 +79,6 @@ async def list_cases(
                 "created_at": c.get("created_at"),
                 "updated_at": c.get("updated_at")
             })
-    else:
-        # Fallback dummy list
-        cases_list = [{
-            "id": "65f1234567890abcdef12346",
-            "reporter_id": str(current_user.get("id")),
-            "type": "digital_arrest",
-            "status": "new",
-            "priority": "high",
-            "source": "web",
-            "summary": "Impersonation call claiming CBI warrant.",
-            "risk_score": 0.92,
-            "created_at": datetime.now(timezone.utc),
-            "updated_at": datetime.now(timezone.utc)
-        }]
-        total = 1
-
     return make_paginated_envelope(cases_list, page, page_size, total, request_id=req_id)
 
 
@@ -87,30 +89,50 @@ async def create_case(
     current_user: dict = Depends(get_current_user)
 ):
     req_id = getattr(request.state, "request_id", "req_default")
+    sp = get_supabase()
     db = get_mongo_db()
     
     user_id = current_user.get("id")
     now = datetime.now(timezone.utc)
-    
-    case_doc = {
-        "reporter_id": ObjectId(user_id) if ObjectId.is_valid(user_id) else user_id,
-        "type": body.type,
-        "status": "new",
-        "priority": body.priority or "medium",
-        "source": body.source or "web",
-        "location": body.location.model_dump() if body.location else None,
-        "summary": body.summary,
-        "risk_score": 0.0,
-        "assigned_officer": None,
-        "created_at": now,
-        "updated_at": now
-    }
+    case_id = None
 
-    if db is not None:
+    if sp is not None:
+        try:
+            sp_doc = {
+                "reporter_id": str(user_id),
+                "type": body.type,
+                "status": "new",
+                "priority": body.priority or "medium",
+                "source": body.source or "web",
+                "location": body.location.model_dump() if body.location else None,
+                "summary": body.summary,
+                "risk_score": 0.0
+            }
+            res = sp.table("cases").insert(sp_doc).execute()
+            if res.data:
+                case_id = str(res.data[0]["id"])
+        except Exception as e:
+            logger.warning("Supabase case insert warning", error=str(e))
+
+    if not case_id and db is not None:
+        case_doc = {
+            "reporter_id": ObjectId(user_id) if ObjectId.is_valid(user_id) else user_id,
+            "type": body.type,
+            "status": "new",
+            "priority": body.priority or "medium",
+            "source": body.source or "web",
+            "location": body.location.model_dump() if body.location else None,
+            "summary": body.summary,
+            "risk_score": 0.0,
+            "assigned_officer": None,
+            "created_at": now,
+            "updated_at": now
+        }
         res = await db.cases.insert_one(case_doc)
         case_id = str(res.inserted_id)
-    else:
-        case_id = f"case_{ObjectId()}"
+
+    if not case_id:
+        case_id = str(uuid.uuid4())
 
     case_data = {
         "id": case_id,
@@ -136,8 +158,17 @@ async def get_case(
     current_user: dict = Depends(get_current_user)
 ):
     req_id = getattr(request.state, "request_id", "req_default")
+    sp = get_supabase()
     db = get_mongo_db()
     
+    if sp is not None:
+        try:
+            res = sp.table("cases").select("*").eq("id", case_id).execute()
+            if res.data:
+                return make_envelope(res.data[0], request_id=req_id)
+        except Exception:
+            pass
+
     if db is not None:
         try:
             c = await db.cases.find_one({"_id": ObjectId(case_id)})
@@ -231,10 +262,18 @@ async def get_case_evidence(
     current_user: dict = Depends(get_current_user)
 ):
     req_id = getattr(request.state, "request_id", "req_default")
+    sp = get_supabase()
     db = get_mongo_db()
     
     evidence_list = []
-    if db is not None:
+    if sp is not None:
+        try:
+            res = sp.table("evidence").select("*").eq("case_id", case_id).execute()
+            evidence_list = res.data or []
+        except Exception:
+            pass
+
+    if not evidence_list and db is not None:
         try:
             cursor = db.evidence.find({"case_id": ObjectId(case_id)})
             async for ev in cursor:
@@ -262,41 +301,149 @@ async def add_case_evidence(
     ml_client: MLClient = Depends(get_ml_client_dep)
 ):
     req_id = getattr(request.state, "request_id", "req_default")
+    sp = get_supabase()
     db = get_mongo_db()
-    
     now = datetime.now(timezone.utc)
+    ev_id = None
+
+    # ── AI Pipeline ──────────────────────────────────────────────────────────
     ml_res = {}
-    if body.type == "audio" and body.file_id:
-        ml_res = await ml_client.analyze_audio(body.file_id)
-    elif body.type == "text" and body.text_content:
-        ml_res = await ml_client.analyze_text(body.text_content)
-    elif body.type == "image" and body.file_id:
-        ml_res = await ml_client.analyze_image(body.file_id)
+    vision_res = {}
 
-    intel_res = await ml_client.fuse_intelligence(case_id, scam_result=ml_res)
+    if body.type in ("text", "scam", "digital_arrest", "phishing") or body.text_content:
+        text_to_analyze = body.text_content or f"Scam incident report of type {body.type}"
+        ml_res = await ml_client.analyze_text(text_to_analyze)
+    elif body.type in ("image", "counterfeit"):
+        vision_res = await ml_client.analyze_image(body.file_id or "image_sample")
+    elif body.type == "audio":
+        ml_res = await ml_client.analyze_audio(body.file_id or "audio_sample")
 
-    evidence_doc = {
-        "case_id": ObjectId(case_id) if ObjectId.is_valid(case_id) else case_id,
+    intel_res = await ml_client.fuse_intelligence(case_id, scam_result=ml_res, vision_result=vision_res)
+    risk_score = intel_res.get("overall_score", vision_res.get("risk_score", ml_res.get("overall_risk_score", 0.0)))
+
+    # ── Persist to Supabase (preferred) ─────────────────────────────────────
+    if sp is not None:
+        try:
+            sp_ev = {
+                "case_id": str(case_id),
+                "type": body.type,
+                "file_id": body.file_id,
+                "text_content": body.text_content,
+                "ml_results": {"scam_intelligence": ml_res, "vision_intelligence": vision_res},
+                "intelligence_output": intel_res
+            }
+            res_ev = sp.table("evidence").insert(sp_ev).execute()
+            if res_ev.data:
+                ev_id = str(res_ev.data[0]["id"])
+            sp.table("cases").update({"risk_score": risk_score, "updated_at": now.isoformat()}).eq("id", case_id).execute()
+        except Exception as e:
+            logger.warning("Supabase evidence insert warning", error=str(e))
+
+    # ── Fallback to MongoDB ──────────────────────────────────────────────────
+    if not ev_id and db is not None:
+        mongo_ev = {
+            "case_id": ObjectId(case_id) if ObjectId.is_valid(case_id) else case_id,
+            "type": body.type,
+            "file_id": body.file_id,
+            "text_content": body.text_content,
+            "ml_results": {"scam_intelligence": ml_res, "vision_intelligence": vision_res},
+            "intelligence_output": intel_res,
+            "created_at": now
+        }
+        res = await db.evidence.insert_one(mongo_ev)
+        ev_id = str(res.inserted_id)
+        if ObjectId.is_valid(case_id):
+            await db.cases.update_one({"_id": ObjectId(case_id)}, {"$set": {"risk_score": risk_score, "updated_at": now}})
+
+    if not ev_id:
+        ev_id = str(uuid.uuid4())
+
+    return make_envelope({
+        "id": ev_id,
+        "case_id": case_id,
         "type": body.type,
         "file_id": body.file_id,
-        "ml_results": {"scam_intelligence": ml_res},
+        "ml_results": {"scam_intelligence": ml_res, "vision_intelligence": vision_res},
         "intelligence_output": intel_res,
         "created_at": now
-    }
+    }, request_id=req_id)
 
-    if db is not None:
-        res = await db.evidence.insert_one(evidence_doc)
-        ev_id = str(res.inserted_id)
-        # Update case risk score if available from fusion
-        risk_score = intel_res.get("overall_score", ml_res.get("risk_score", 0.85))
-        await db.cases.update_one({"_id": ObjectId(case_id)}, {"$set": {"risk_score": risk_score, "updated_at": now}})
+
+@router.post("/cases/{case_id}/evidence/upload", tags=["Cases"])
+async def upload_case_evidence(
+    case_id: str,
+    request: Request,
+    file: UploadFile = File(...),
+    evidence_type: str = Form("image"),
+    current_user: dict = Depends(get_current_user),
+    ml_client: MLClient = Depends(get_ml_client_dep)
+):
+    req_id = getattr(request.state, "request_id", "req_default")
+    sp = get_supabase()
+    db = get_mongo_db()
+    content = await file.read()
+    now = datetime.now(timezone.utc)
+    ev_id = None
+
+    # ── AI Pipeline ──────────────────────────────────────────────────────────
+    ml_res = {}
+    vision_res = {}
+
+    if evidence_type in ("image", "counterfeit", "document"):
+        vision_res = await ml_client.analyze_image(file.filename or "uploaded_img", file_bytes=content, filename=file.filename or "image.png")
+    elif evidence_type == "audio":
+        ml_res = await ml_client.analyze_audio(file.filename or "uploaded_audio", file_bytes=content, filename=file.filename or "audio.wav")
     else:
-        ev_id = f"ev_{ObjectId()}"
+        text_str = content.decode('utf-8', errors='ignore')
+        ml_res = await ml_client.analyze_text(text_str)
 
-    evidence_doc["id"] = ev_id
-    evidence_doc["case_id"] = case_id
+    intel_res = await ml_client.fuse_intelligence(case_id, scam_result=ml_res, vision_result=vision_res)
+    risk_score = intel_res.get("overall_score", vision_res.get("risk_score", ml_res.get("overall_risk_score", 0.0)))
 
-    return make_envelope(evidence_doc, request_id=req_id)
+    # ── Persist to Supabase (preferred) ─────────────────────────────────────
+    if sp is not None:
+        try:
+            sp_ev = {
+                "case_id": str(case_id),
+                "type": evidence_type,
+                "file_name": file.filename,
+                "ml_results": {"scam_intelligence": ml_res, "vision_intelligence": vision_res},
+                "intelligence_output": intel_res
+            }
+            res_ev = sp.table("evidence").insert(sp_ev).execute()
+            if res_ev.data:
+                ev_id = str(res_ev.data[0]["id"])
+            sp.table("cases").update({"risk_score": risk_score, "updated_at": now.isoformat()}).eq("id", case_id).execute()
+        except Exception as e:
+            logger.warning("Supabase upload evidence insert warning", error=str(e))
+
+    # ── Fallback to MongoDB ──────────────────────────────────────────────────
+    if not ev_id and db is not None:
+        mongo_ev = {
+            "case_id": ObjectId(case_id) if ObjectId.is_valid(case_id) else case_id,
+            "type": evidence_type,
+            "file_name": file.filename,
+            "ml_results": {"scam_intelligence": ml_res, "vision_intelligence": vision_res},
+            "intelligence_output": intel_res,
+            "created_at": now
+        }
+        res = await db.evidence.insert_one(mongo_ev)
+        ev_id = str(res.inserted_id)
+        if ObjectId.is_valid(case_id):
+            await db.cases.update_one({"_id": ObjectId(case_id)}, {"$set": {"risk_score": risk_score, "updated_at": now}})
+
+    if not ev_id:
+        ev_id = str(uuid.uuid4())
+
+    return make_envelope({
+        "id": ev_id,
+        "case_id": case_id,
+        "type": evidence_type,
+        "file_name": file.filename,
+        "ml_results": {"scam_intelligence": ml_res, "vision_intelligence": vision_res},
+        "intelligence_output": intel_res,
+        "created_at": now
+    }, request_id=req_id)
 
 
 @router.get("/cases/{case_id}/timeline", tags=["Cases"])

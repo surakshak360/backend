@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Any
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from neo4j import AsyncGraphDatabase, AsyncDriver
 import redis.asyncio as aioredis
@@ -6,9 +6,17 @@ from app.core.config import settings
 from app.core.logging import logger
 
 
+try:
+    from supabase import create_client, Client
+except Exception:
+    create_client = None
+    Client = None
+
+
 class Database:
     client: Optional[AsyncIOMotorClient] = None
     db: Optional[AsyncIOMotorDatabase] = None
+    supabase_client: Optional[Any] = None
     neo4j_driver: Optional[AsyncDriver] = None
     redis_client: Optional[aioredis.Redis] = None
 
@@ -82,6 +90,22 @@ def get_neo4j_session():
     if db_instance.neo4j_driver is None:
         return None
     return db_instance.neo4j_driver.session()
+
+
+async def connect_to_supabase():
+    if settings.SUPABASE_URL and settings.SUPABASE_KEY and create_client:
+        try:
+            logger.info("Connecting to Supabase...", url=settings.SUPABASE_URL)
+            db_instance.supabase_client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
+            logger.info("Connected to Supabase Client")
+        except Exception as e:
+            logger.warning("Supabase connection failed", error=str(e))
+            db_instance.supabase_client = None
+
+
+def get_supabase():
+    """Return the Supabase client, or None if unavailable."""
+    return db_instance.supabase_client
 
 
 def get_redis():
