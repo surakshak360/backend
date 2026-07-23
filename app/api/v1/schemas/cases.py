@@ -4,15 +4,20 @@ from datetime import datetime
 
 
 class GeoLocation(BaseModel):
-    type: Literal["Point"] = "Point"
-    coordinates: List[float] = Field(..., description="[longitude, latitude]")
+    type: Optional[str] = "Point"
+    coordinates: Optional[List[float]] = None
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    district: Optional[str] = None
+    state: Optional[str] = None
+    address: Optional[str] = None
 
 
 class CaseCreate(BaseModel):
-    type: Literal["digital_arrest", "counterfeit", "phishing", "other"]
+    type: str = Field(..., description="Type of incident e.g. digital_arrest, counterfeit, scam, identity, phishing, other")
     summary: str
-    priority: Optional[Literal["low", "medium", "high", "critical"]] = "medium"
-    source: Optional[Literal["whatsapp", "web", "call", "app"]] = "web"
+    priority: Optional[str] = "medium"
+    source: Optional[str] = "web"
     location: Optional[GeoLocation] = None
     reporter_phone: Optional[str] = None
 

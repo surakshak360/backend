@@ -5,7 +5,7 @@ from datetime import datetime
 
 class EvidenceCreate(BaseModel):
     case_id: str
-    type: Literal["audio", "image", "document", "url", "text"]
+    type: str
     file_id: Optional[str] = None
     text_content: Optional[str] = None
     url: Optional[str] = None
@@ -14,7 +14,7 @@ class EvidenceCreate(BaseModel):
 class EvidenceResponse(BaseModel):
     id: str
     case_id: str
-    type: Literal["audio", "image", "document", "url", "text"]
+    type: str
     file_id: Optional[str] = None
     ml_results: Optional[Dict[str, Any]] = None
     intelligence_output: Optional[Dict[str, Any]] = None

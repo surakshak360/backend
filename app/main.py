@@ -97,8 +97,10 @@ async def request_middleware(request: Request, call_next):
     )
     return response
 
-# Include API Router
+# Include API Router (mount both /v1 and /api/v1 for compatibility)
 app.include_router(api_router, prefix=settings.API_V1_STR)
+if settings.API_V1_STR != "/api/v1":
+    app.include_router(api_router, prefix="/api/v1")
 
 
 @app.get("/health", tags=["Health"])
